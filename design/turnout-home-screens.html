@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Turnout — home screens</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,700&family=Public+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#F4F3EE; --ink:#1A211C; --muted:#6B7268; --line:#DDDCD3;
+    --card:#FFFFFF; --amber:#FFB100;
+    --accent:#2E6B46; --accent-soft:#E4EEE7;   /* volunteer default */
+    --r:16px;
+  }
+  body.org{ --accent:#2B4C7E; --accent-soft:#E3E9F2; }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{
+    background:var(--paper); color:var(--ink);
+    font-family:'Public Sans',sans-serif; font-size:15px; line-height:1.45;
+    max-width:430px; margin:0 auto; min-height:100vh;
+    transition:background .3s;
+  }
+  .mono{font-family:'IBM Plex Mono',monospace}
+  h1,h2,h3,.disp{font-family:'Bricolage Grotesque',sans-serif}
+
+  /* ---------- header + the switch ---------- */
+  header{
+    padding:18px 20px 14px; display:flex; align-items:center; justify-content:space-between;
+    position:sticky; top:0; background:var(--paper); z-index:10;
+    border-bottom:1px solid var(--line);
+  }
+  .wordmark{font-family:'Bricolage Grotesque'; font-weight:700; font-size:20px; letter-spacing:-.02em}
+  .wordmark span{color:var(--accent); transition:color .3s}
+
+  .me{
+    all:unset; cursor:pointer; width:38px; height:38px; border-radius:50%;
+    background:var(--accent-soft); color:var(--accent); font-weight:600; font-size:13px;
+    display:flex; align-items:center; justify-content:center; position:relative;
+    transition:background .3s, color .3s;
+  }
+  .me .dot{
+    position:absolute; right:-1px; bottom:-1px; width:11px; height:11px; border-radius:50%;
+    background:var(--accent); border:2px solid var(--paper); transition:background .3s;
+  }
+
+  /* profile sheet (where the switch lives — Fiverr pattern) */
+  .scrim{position:fixed; inset:0; background:rgba(20,25,21,.45); opacity:0; pointer-events:none; transition:opacity .25s; z-index:20}
+  .sheet{
+    position:fixed; left:0; right:0; bottom:0; max-width:430px; margin:0 auto; z-index:21;
+    background:var(--paper); border-radius:20px 20px 0 0; padding:14px 20px 30px;
+    transform:translateY(105%); transition:transform .3s cubic-bezier(.4,1.2,.4,1);
+  }
+  body.sheet-open .scrim{opacity:1; pointer-events:auto}
+  body.sheet-open .sheet{transform:none}
+  .grab{width:36px; height:4px; border-radius:99px; background:var(--line); margin:0 auto 16px}
+  .sheet .who{display:flex; align-items:center; gap:12px; margin-bottom:18px}
+  .sheet .who .me{width:46px; height:46px; font-size:15px; cursor:default}
+  .sheet .who .name{font-family:'Bricolage Grotesque'; font-weight:600; font-size:17px}
+  .sheet .who .meta{font-size:12.5px; color:var(--muted)}
+  .modecard{
+    width:100%; border:1px solid var(--line); background:var(--card); border-radius:var(--r);
+    padding:14px 16px; display:flex; align-items:center; justify-content:space-between; gap:12px;
+    cursor:pointer; margin-bottom:10px; text-align:left;
+  }
+  .modecard .t{font-weight:600; font-size:14.5px}
+  .modecard .s{font-size:12.5px; color:var(--muted)}
+  .sheet-row{display:block; width:100%; padding:13px 4px; border:none; background:none; text-align:left;
+    font-family:'Public Sans'; font-size:14.5px; color:var(--ink); border-bottom:1px solid var(--line); cursor:pointer}
+  .sheet-row:last-child{border:none}
+
+  .switch{
+    display:flex; background:var(--ink); border-radius:999px; padding:3px;
+    cursor:pointer; user-select:none; position:relative; flex-shrink:0;
+  }
+  .switch button{
+    all:unset; padding:7px 14px; border-radius:999px; font-family:'Public Sans';
+    font-size:12.5px; font-weight:600; color:#B8BDB6; position:relative; z-index:1;
+    transition:color .25s; cursor:pointer;
+  }
+  .switch button:focus-visible{outline:2px solid var(--amber); outline-offset:2px}
+  .switch button.on{color:var(--ink)}
+  .thumb{
+    position:absolute; top:3px; bottom:3px; border-radius:999px; background:var(--paper);
+    transition:left .25s cubic-bezier(.5,1.4,.5,1), width .25s;
+  }
+
+  /* ---------- shared bits ---------- */
+  main{padding:20px}
+  .greet{font-size:26px; font-weight:600; letter-spacing:-.02em; margin-bottom:2px}
+  .sub{color:var(--muted); margin-bottom:22px}
+  .eyebrow{
+    font-size:11px; font-weight:600; letter-spacing:.09em; text-transform:uppercase;
+    color:var(--muted); margin:26px 0 10px;
+  }
+  .card{
+    background:var(--card); border:1px solid var(--line); border-radius:var(--r);
+    padding:16px; margin-bottom:12px;
+  }
+  .btn{
+    all:unset; display:inline-block; background:var(--accent); color:#fff;
+    padding:10px 18px; border-radius:12px; font-weight:600; font-size:14px;
+    cursor:pointer; transition:background .3s, transform .08s;
+  }
+  .btn:active{transform:scale(.97)}
+  .btn.ghost{background:var(--accent-soft); color:var(--accent)}
+  .pill{
+    display:inline-block; font-size:11.5px; font-weight:600; padding:3px 10px;
+    border-radius:999px; background:var(--accent-soft); color:var(--accent);
+  }
+  .pill.amber{background:#FFF3D6; color:#8A5E00}
+  .row{display:flex; align-items:center; justify-content:space-between; gap:12px}
+
+  /* ---------- mode panes ---------- */
+  .pane{display:none; animation:slidein .3s ease}
+  .pane.show{display:block}
+  @keyframes slidein{from{opacity:0; transform:translateX(14px)} to{opacity:1; transform:none}}
+  @media (prefers-reduced-motion: reduce){ .pane{animation:none} .thumb{transition:none} }
+
+  /* volunteer specifics */
+  .next-card{border-left:4px solid var(--accent)}
+  .when{font-size:13px; color:var(--muted); margin-bottom:4px}
+  .opp-title{font-family:'Bricolage Grotesque'; font-weight:600; font-size:17px}
+  .ledger{
+    display:flex; gap:0; background:var(--ink); border-radius:var(--r);
+    padding:16px 0; margin-bottom:12px; color:#fff;
+  }
+  .ledger div{flex:1; text-align:center; border-right:1px solid #333B34}
+  .ledger div:last-child{border:none}
+  .ledger .n{font-size:22px; color:var(--amber)}
+  .ledger .l{font-size:10.5px; letter-spacing:.08em; text-transform:uppercase; color:#9AA198; margin-top:2px}
+  .disc{display:flex; gap:10px; overflow-x:auto; padding-bottom:6px; scrollbar-width:none}
+  .disc::-webkit-scrollbar{display:none}
+  .disc .card{min-width:210px; margin:0}
+  .dist{font-size:12px; color:var(--muted)}
+
+  /* org specifics */
+  .fill-bar{height:7px; background:var(--line); border-radius:99px; overflow:hidden; margin:8px 0 4px}
+  .fill-bar i{display:block; height:100%; background:var(--accent); border-radius:99px; transition:background .3s}
+  .fill-bar i.warn{background:var(--amber)}
+  .fill-meta{font-size:12.5px; color:var(--muted)}
+  .avatar{width:34px; height:34px; border-radius:50%; background:var(--accent-soft); color:var(--accent);
+    display:flex; align-items:center; justify-content:center; font-weight:600; font-size:13px; flex-shrink:0}
+  .roster-row{display:flex; align-items:center; gap:12px; padding:10px 0; border-bottom:1px solid var(--line)}
+  .roster-row:last-child{border:none; padding-bottom:0}
+  .roster-row .name{font-weight:600; font-size:14px}
+  .roster-row .meta{font-size:12px; color:var(--muted)}
+  .check{all:unset; cursor:pointer; font-size:12.5px; font-weight:600; color:var(--accent);
+    background:var(--accent-soft); padding:6px 12px; border-radius:10px}
+  .check.done{background:var(--ink); color:var(--amber)}
+
+  /* bottom nav */
+  nav{
+    position:sticky; bottom:0; background:var(--paper); border-top:1px solid var(--line);
+    display:flex; padding:10px 0 16px; margin-top:8px;
+  }
+  nav a{flex:1; text-align:center; font-size:11px; font-weight:600; color:var(--muted); text-decoration:none}
+  nav a.on{color:var(--accent)}
+  nav a i{display:block; font-size:18px; font-style:normal; margin-bottom:2px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wordmark">turn<span>out</span></div>
+  <button class="me" id="openProfile" aria-label="Profile and mode switch">SR<i class="dot"></i></button>
+</header>
+
+<main>
+
+  <!-- ================= VOLUNTEER HOME ================= -->
+  <section class="pane show" id="paneV">
+    <div class="greet">Morning, Sam</div>
+    <div class="sub">You're 2 hours from a 50-hour badge.</div>
+
+    <div class="eyebrow">Up next</div>
+    <div class="card next-card">
+      <div class="when">Tomorrow · 9:00–11:30 AM · 1.2 mi away</div>
+      <div class="opp-title">Saturday pantry shift</div>
+      <div class="sub" style="margin:4px 0 14px">Eastside Food Bank · North gate entrance</div>
+      <div class="row">
+        <button class="btn">Confirm I'm coming</button>
+        <span class="pill amber">Confirm by 9 PM</span>
+      </div>
+    </div>
+    <div class="card">
+      <div class="when">Thu Aug 13 · 6:00–8:00 PM</div>
+      <div class="opp-title">River trail cleanup</div>
+      <div class="row" style="margin-top:8px">
+        <span class="pill">Confirmed ✓</span>
+        <span class="dist">Parks Alliance</span>
+      </div>
+    </div>
+
+    <div class="eyebrow">Your record</div>
+    <div class="ledger mono">
+      <div><div class="n">48</div><div class="l">Hours</div></div>
+      <div><div class="n">6</div><div class="l">Week streak</div></div>
+      <div><div class="n">3</div><div class="l">Orgs</div></div>
+    </div>
+
+    <div class="eyebrow">Near you this week</div>
+    <div class="disc">
+      <div class="card">
+        <span class="pill">Animals</span>
+        <div class="opp-title" style="margin:8px 0 4px">Dog walking, morning block</div>
+        <div class="dist">Haven Shelter · 0.8 mi · Recurring</div>
+      </div>
+      <div class="card">
+        <span class="pill">Skills</span>
+        <div class="opp-title" style="margin:8px 0 4px">Design a fundraiser flyer</div>
+        <div class="dist">Remote · ~4 hrs · Deadline Aug 22</div>
+      </div>
+      <div class="card">
+        <span class="pill">Food</span>
+        <div class="opp-title" style="margin:8px 0 4px">Meal delivery drivers</div>
+        <div class="dist">Sunrise Kitchen · 2.1 mi</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= ORG HOME ================= -->
+  <section class="pane" id="paneO">
+    <div class="greet">Eastside Food Bank</div>
+    <div class="sub">Saturday needs attention — 4 spots open.</div>
+
+    <div class="eyebrow">This week's shifts</div>
+    <div class="card">
+      <div class="row">
+        <div class="opp-title">Sat pantry · 9:00 AM</div>
+        <span class="pill amber">4 open</span>
+      </div>
+      <div class="fill-bar"><i class="warn" style="width:60%"></i></div>
+      <div class="fill-meta">6 of 10 filled · 4 confirmed</div>
+      <button class="btn ghost" style="margin-top:12px">Nudge past volunteers</button>
+    </div>
+    <div class="card">
+      <div class="row">
+        <div class="opp-title">Tue restock · 6:00 PM</div>
+        <span class="pill">Full ✓</span>
+      </div>
+      <div class="fill-bar"><i style="width:100%"></i></div>
+      <div class="fill-meta">8 of 8 filled · 7 confirmed</div>
+    </div>
+
+    <div class="eyebrow">Today's roster — check in</div>
+    <div class="card">
+      <div class="roster-row">
+        <div class="avatar">SR</div>
+        <div style="flex:1"><div class="name">Sam Reyes</div><div class="meta">12 shifts with you · confirmed</div></div>
+        <button class="check done">In ✓</button>
+      </div>
+      <div class="roster-row">
+        <div class="avatar">JK</div>
+        <div style="flex:1"><div class="name">Jordan Kim</div><div class="meta">First shift · confirmed</div></div>
+        <button class="check">Check in</button>
+      </div>
+      <div class="roster-row">
+        <div class="avatar">MT</div>
+        <div style="flex:1"><div class="name">Maya Torres</div><div class="meta">4 shifts · not confirmed</div></div>
+        <button class="check">Check in</button>
+      </div>
+    </div>
+
+    <div class="eyebrow">Waiting on you</div>
+    <div class="card">
+      <div class="row">
+        <div><div class="name" style="font-weight:600">3 new applicants</div>
+        <div class="fill-meta">2 for pantry shifts, 1 for the flyer project</div></div>
+        <button class="btn">Review</button>
+      </div>
+    </div>
+
+    <div class="eyebrow">Last 30 days</div>
+    <div class="ledger mono">
+      <div><div class="n">212</div><div class="l">Hours</div></div>
+      <div><div class="n">91%</div><div class="l">Show rate</div></div>
+      <div><div class="n">14</div><div class="l">New vols</div></div>
+    </div>
+  </section>
+
+</main>
+
+<div class="scrim" id="scrim"></div>
+<div class="sheet" role="dialog" aria-label="Profile">
+  <div class="grab"></div>
+  <div class="who">
+    <span class="me">SR</span>
+    <div>
+      <div class="name">Sam Reyes</div>
+      <div class="meta" id="whoMeta">Volunteering since March · 48 hrs</div>
+    </div>
+  </div>
+  <div class="modecard" role="group" aria-label="Mode">
+    <div>
+      <div class="t">Mode</div>
+      <div class="s" id="modeHint">You're volunteering</div>
+    </div>
+    <div class="switch" role="tablist" aria-label="Switch mode">
+      <div class="thumb" id="thumb"></div>
+      <button id="bV" class="on" role="tab" aria-selected="true">Volunteer</button>
+      <button id="bO" role="tab" aria-selected="false">My org</button>
+    </div>
+  </div>
+  <button class="sheet-row">Account & notifications</button>
+  <button class="sheet-row">My verified record</button>
+  <button class="sheet-row">Help</button>
+</div>
+
+<nav id="navV">
+  <a class="on"><i>⌂</i>Home</a><a><i>⌕</i>Discover</a><a><i>▤</i>Schedule</a><a><i>◷</i>Hours</a>
+</nav>
+<nav id="navO" style="display:none">
+  <a class="on"><i>⌂</i>Home</a><a><i>＋</i>Listings</a><a><i>◉</i>Roster</a><a><i>▦</i>Reports</a>
+</nav>
+
+<script>
+const bV=document.getElementById('bV'), bO=document.getElementById('bO'), thumb=document.getElementById('thumb');
+const pV=document.getElementById('paneV'), pO=document.getElementById('paneO');
+const nV=document.getElementById('navV'), nO=document.getElementById('navO');
+
+const scrim=document.getElementById('scrim'), openBtn=document.getElementById('openProfile');
+const modeHint=document.getElementById('modeHint'), whoMeta=document.getElementById('whoMeta');
+
+function setThumb(btn){ thumb.style.left=btn.offsetLeft+'px'; thumb.style.width=btn.offsetWidth+'px'; }
+function openSheet(){ document.body.classList.add('sheet-open'); requestAnimationFrame(()=>setThumb(document.body.classList.contains('org')?bO:bV)); }
+function closeSheet(){ document.body.classList.remove('sheet-open'); }
+openBtn.onclick=openSheet; scrim.onclick=closeSheet;
+
+function mode(org){
+  document.body.classList.toggle('org', org);
+  bV.classList.toggle('on', !org); bO.classList.toggle('on', org);
+  bV.setAttribute('aria-selected', !org); bO.setAttribute('aria-selected', org);
+  pV.classList.toggle('show', !org); pO.classList.toggle('show', org);
+  nV.style.display=org?'none':'flex'; nO.style.display=org?'flex':'none';
+  modeHint.textContent=org?"You're running Eastside Food Bank":"You're volunteering";
+  whoMeta.textContent=org?"Coordinator · Eastside Food Bank":"Volunteering since March · 48 hrs";
+  setThumb(org?bO:bV);
+  setTimeout(closeSheet, 420);   // let the flip land, then reveal the re-tinted home
+}
+bV.onclick=()=>mode(false); bO.onclick=()=>mode(true);
+window.addEventListener('resize',()=>{ if(document.body.classList.contains('sheet-open')) setThumb(document.body.classList.contains('org')?bO:bV); });
+
+// toy check-in interaction
+document.querySelectorAll('.check').forEach(b=>{
+  b.onclick=()=>{ b.classList.add('done'); b.textContent='In ✓'; };
+});
+</script>
+</body>
+</html>
