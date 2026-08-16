@@ -8,8 +8,10 @@
 --   I4  Visibility is enforced by RLS, not by application code.
 -- ============================================================================
 
+-- postgis only. gen_random_uuid() is core since PG13, so pgcrypto is not
+-- required and is deliberately not depended on: on hosted Supabase it lives in
+-- the extensions schema and is not on the migration's search_path.
 create extension if not exists postgis;
-create extension if not exists pgcrypto;
 
 -- ---------------------------------------------------------------------------
 -- Enums
@@ -102,7 +104,12 @@ create table org_invites (
   org_id     uuid not null references orgs (id) on delete cascade,
   email      text not null,
   role       org_role not null default 'coordinator',
-  token      text not null unique default encode(gen_random_bytes(24), 'hex'),
+  -- Two core-Postgres v4 UUIDs, hyphens stripped: 64 hex chars from the same
+  -- CSPRNG pgcrypto would have used, without depending on pgcrypto being
+  -- resolvable from the migration's search_path (it is not, on hosted).
+  token      text not null unique default
+               replace(gen_random_uuid()::text, '-', '') ||
+               replace(gen_random_uuid()::text, '-', ''),
   invited_by uuid not null references users (id),
   accepted_at timestamptz,
   expires_at timestamptz not null default now() + interval '14 days',
