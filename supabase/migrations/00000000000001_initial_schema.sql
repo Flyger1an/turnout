@@ -549,6 +549,7 @@ language plpgsql as $$
 declare
   v_org_id   uuid;
   v_minutes  integer;
+  v_raw      integer;
   v_duration integer;
   v_start    timestamptz;
   v_end      timestamptz;
@@ -565,16 +566,20 @@ begin
   where s.id = new.shift_id;
 
   -- clamp(checkout - checkin, 15 min, shift duration + 30 min)
-  v_minutes := greatest(
-    15,
-    least(
-      v_duration + 30,
-      coalesce(
-        (extract(epoch from (coalesce(new.checked_out_at, v_end) - coalesce(new.checked_in_at, v_start))) / 60)::integer,
-        v_duration
-      )
-    )
-  );
+  --
+  -- A coordinator catching up on the roster after the shift stamps checked_in_at
+  -- later than ends_at, which makes the raw span negative and would floor an
+  -- honest two-hour shift at the 15-minute minimum. A non-positive span carries
+  -- no information about attendance, so fall back to the shift's own length.
+  v_raw := (extract(epoch from (
+              coalesce(new.checked_out_at, v_end) - coalesce(new.checked_in_at, v_start)
+            )) / 60)::integer;
+
+  if v_raw is null or v_raw <= 0 then
+    v_raw := v_duration;
+  end if;
+
+  v_minutes := greatest(15, least(v_duration + 30, v_raw));
 
   insert into hour_entries (user_id, org_id, shift_id, signup_id, minutes, source, occurred_at)
   values (new.user_id, v_org_id, new.shift_id, new.id, v_minutes,

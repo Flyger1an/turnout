@@ -1,6 +1,6 @@
 # TURNOUT — Implementation Spec
 
-**Status:** ready to build · **Scope:** M1–M5 · **Schema:** `supabase/migrations/00000000000001_init.sql`
+**Status:** ready to build · **Scope:** M1–M5 · **Schema:** `supabase/migrations/00000000000001_initial_schema.sql`
 **Reference mock:** `design/turnout-home-screens.html` · **Original brief:** `design/original-brief.md`
 
 Work the milestones in order. Each has acceptance criteria that must pass before the next
@@ -412,6 +412,13 @@ On `checked_in → completed`, mint an `hour_entries` row:
 `minutes = clamp(checkout − checkin, 15, shift_duration + 30)`, `source` = the method used.
 Coordinator manual entry is allowed with `verified_by` set. This is trigger-owned
 (`signups_mint_hours`) so it cannot be forgotten by a code path.
+
+**Retroactive check-in.** A coordinator catching up on the roster after everyone has gone
+home stamps `checked_in_at` later than `ends_at`, which makes the raw span negative and
+would floor a genuine two-hour shift at the 15-minute minimum. A non-positive span carries
+no information about attendance, so it falls back to the shift's own duration. This is not
+a corner case — coordinators are busiest during the shift, which is exactly when they are
+least able to tap twelve check-in buttons.
 
 **Every entry carries a verification tier**, generated from how it was earned:
 
