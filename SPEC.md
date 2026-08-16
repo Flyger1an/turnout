@@ -29,7 +29,8 @@ Three things we win on:
    record is portable and belongs to them, not to the org that happened to host them.
 
 **North-star metric:** first-shift → second-shift conversion. Every design decision that
-trades against it loses.
+trades against it loses. Day to day you steer on **show rate**, which moves first and is
+felt by coordinators immediately — see §10.
 
 ---
 
@@ -87,7 +88,7 @@ turnout/
   components/
     mode-switch.tsx                # THE toggle. Owns body class + route swap.
     shift-card.tsx  fill-bar.tsx  ledger.tsx  roster-row.tsx  confirm-cta.tsx
-    empty/                         # one component per designed empty state (§13.1)
+    empty/                         # one component per designed empty state (§12.1)
   lib/
     supabase/  client.ts server.ts middleware.ts
     rrule.ts        # materialization window logic
@@ -153,10 +154,14 @@ in `accepted` or `applied`. `verification_status` and `ein` exist now; verificat
 re-run safely.
 
 **`signups`** — the lifecycle object, one per (shift, user). Every beat gets its own
-timestamp column so funnel analysis needs no event log join.
+timestamp column so funnel analysis needs no event log join. `cancelled_by_org`
+distinguishes "they cancelled on me" from "I cancelled"; `excused_by` records who forgave
+an absence.
 
 **`hour_entries`** — append-only ledger (I3). Negative `minutes` with `reverses` set is how
 a correction is made. `hour_entries_one_per_signup` (partial unique) stops double-minting.
+`verification_tier` is generated, not stored by the caller — `attested` / `device` /
+`self`, in descending order of how much weight the export puts on it.
 
 **`scheduled_reminders`** — the dispatcher's queue. `unique (signup_id, kind)` makes
 scheduling idempotent — re-running the scheduler never double-sends.
@@ -198,10 +203,11 @@ Legal transitions (mirrors `signup_legal_transition()` exactly — keep them in 
 |---|---|
 | `applied` | `accepted`, `waitlisted`, `declined`, `cancelled` |
 | `waitlisted` | `accepted`, `cancelled`, `declined` |
-| `accepted` | `confirmed`, `checked_in`, `cancelled`, `no_show` |
-| `confirmed` | `checked_in`, `cancelled`, `no_show` |
+| `accepted` | `confirmed`, `checked_in`, `cancelled`, `no_show`, `excused` |
+| `confirmed` | `checked_in`, `cancelled`, `no_show`, `excused` |
 | `checked_in` | `completed`, `no_show` |
-| `completed` / `no_show` / `cancelled` / `declined` | terminal |
+| `no_show` | `excused` — the only edge out of a terminal state |
+| `completed` / `excused` / `cancelled` / `declined` | terminal |
 
 `accepted → checked_in` is deliberately legal: someone who never tapped confirm but
 physically showed up gets checked in and credited. Reality outranks the funnel.
@@ -209,7 +215,7 @@ physically showed up gets checked in and credited. Reality outranks the funnel.
 **Capacity and races.** Placement happens in `signups_place_on_insert()` with the shift row
 locked. Two people racing for the last spot: one gets `accepted`, the other is already
 `waitlisted` at position 1 by the time the insert returns. The UI never shows an error for
-this — it shows "That spot just filled — you're first on the waitlist" (§13.2).
+this — it shows "That spot just filled — you're first on the waitlist" (§12.2).
 
 **Waitlist promotion** is FIFO by `waitlist_position`, fired by `signups_promote_waitlist()`
 on any vacancy. Promotion schedules the confirm reminder like any other acceptance.
@@ -217,6 +223,29 @@ on any vacancy. Promotion schedules the confirm reminder like any other acceptan
 ---
 
 ## 8. Milestones
+
+### 8.0 — Why the lifecycle ships before discovery
+
+The obvious order is discovery then lifecycle: let people find shifts, then run them. It's
+wrong, and it's the most expensive thing to get wrong here.
+
+Discovery is the marketplace half. With three organizations on the platform it is an empty
+room — a volunteer opens the feed, sees two dog-walking shifts nine miles away, and never
+returns. It cannot work before density exists, and density is months of sales away.
+
+The lifecycle loop is the **single-player half**. A food bank with forty volunteers it
+already has gets real value on day one — roster, check-in, grant-ready hours — with zero
+other orgs on the platform and zero volunteers acquired through it. Volunteers arrive by
+invite link. Nothing about that requires a marketplace.
+
+So: build the tool, earn the density, then open the feed. Come for the tool, stay for the
+network. This also makes the four-consecutive-weeks bar in §11 reachable months earlier,
+because it never depended on discovery in the first place.
+
+The corollary is a sales requirement, not an engineering one: **name a design partner before
+M2 starts** and let their actual shift structure drive the listing composer. Five milestones
+built before a single organization touches the product is the real risk here, and no amount
+of spec detail reduces it.
 
 ### M1 — Foundation: auth, profile, mode toggle
 
@@ -291,38 +320,16 @@ convert to UTC. Generating in UTC and adding 7 days drifts an hour twice a year.
 
 ---
 
-### M3 — Discovery and signup
-
-Discover feed: published opportunities ranked by distance using the PostGIS `<->` operator
-against `users.home_location`, filterable by cause tag, kind, and "this week". Remote
-projects sort into their own band rather than pretending to have a distance.
-
-Opportunity page by kind:
-- **Recurring** — shift picker with **multi-select**. This is the differentiator: "every
-  Friday this month" is one tap and inserts one signup per selected shift, in a single
-  transaction. Partial failure rolls the whole set back.
-- **Event** — single RSVP.
-- **Project** — apply with answers against `opportunities.questions`.
-
-Auto-accept orgs go straight to `accepted`; others land in `applied`. Capacity full →
-`waitlisted` with position shown honestly ("2nd on the waitlist"). Cancel with a
-confirmation step that names what's being cancelled.
-
-**Accept**
-- Volunteer books 4 Friday shifts in one action; 4 signups exist; the ledger of upcoming
-  shifts reflects all 4.
-- Capacity is respected under concurrent load (test: 10 parallel inserts on a 5-capacity
-  shift → exactly 5 accepted, 5 waitlisted with positions 1–5, no duplicates).
-- Cancelling an accepted signup promotes the first waitlisted person and schedules their
-  confirm reminder.
-- Volunteer home "Up next" matches the database.
-
----
-
-### M4 — The lifecycle loop
+### M3 — The lifecycle loop
 
 **This milestone is the company.** All four beats ship together; three of four is worth
 nothing.
+
+It runs before discovery deliberately (§8.0). Volunteers reach a shift here through an
+**org invite link**, not a feed: the coordinator shares a link to an opportunity, the
+volunteer signs up against it, and the entire loop runs. That is enough for one real
+organization to run four consecutive weeks of real shifts — the bar set in §11 — with no
+marketplace underneath it.
 
 #### Confirm
 On acceptance, schedule `confirm_48h` (T−48h) and `logistics_2h` (T−2h) in
@@ -349,9 +356,23 @@ On `checked_in → completed`, mint an `hour_entries` row:
 Coordinator manual entry is allowed with `verified_by` set. This is trigger-owned
 (`signups_mint_hours`) so it cannot be forgotten by a code path.
 
-Volunteer hours screen: mono-type ledger, running totals, per-org breakdown, and
-**Export PDF** — a signed summary with org names and an attestation line. That PDF is the
-portable record and the reason a volunteer keeps the app after their program ends.
+**Every entry carries a verification tier**, generated from how it was earned:
+
+| Tier | Means | Earned by |
+|---|---|---|
+| `attested` | A named coordinator vouched for it | `verified_by` set |
+| `device` | A scan or a location fix | `qr`, `geofence` |
+| `self` | The volunteer said so | `self`, `adjustment` |
+
+This matters because a QR code is one screenshot away from forgery. If the ledger is going
+to back court-ordered service or NHS hours, it has to be honest about the strength of each
+line rather than flattening everything into a single total. The export **shows the mix**
+("48 hours · 41 coordinator-attested"). The first time a school administrator catches a
+fabricated total, the entire value proposition dies — so the product never claims more
+than it can defend.
+
+Volunteer hours screen: mono-type ledger, running totals, per-org breakdown, tier shown
+per entry, and **Export PDF**.
 
 #### Close the loop
 `cron/noshow` runs every 15 minutes and sweeps shifts that ended 2+ hours ago:
@@ -360,14 +381,68 @@ with checkout at `ends_at`. Then `post_event_thanks` fires with hours earned plu
 impact stat if one was logged ("You helped serve 340 meals"). The coordinator gets a prompt
 to log an `impact_stats` metric on the roster screen once the shift ends.
 
+#### 8.5 — Cancellation and correction
+
+Two paths the original brief left out. Both are high-emotion moments, and both corrupt the
+metrics if handled badly.
+
+**The org cancels a shift.** The angriest moment in the product: twelve people rearranged a
+Saturday. `cancel_shift(shift_id, reason)` stamps `shifts.cancelled_at`, releases every
+open signup to `cancelled` with `cancelled_by_org = true`, queues an immediate
+`shift_cancelled` notification for each person, and voids the pending confirm and logistics
+reminders for a shift that is no longer happening. `cancelled_by_org` is permanent, so
+"you cancelled" and "they cancelled" never read the same in the volunteer's own record.
+Copy names the reason and the org, and offers the nearest alternative shift inline.
+
+**The coordinator excuses an absence.** `no_show` is otherwise a permanent mark applied by
+a cron sweep to someone whose kid got sick and who texted the coordinator about it. The
+`excused` status is the only edge out of a terminal state, requires `excused_by`, and sits
+in **neither** the numerator nor the denominator of show rate. Without it, coordinators
+watch the product blame volunteers they know had good reasons, and stop trusting the one
+number Turnout sells on. The roster screen offers "Excuse" on any `no_show` row for 7 days
+after the shift.
+
 **Accept**
 - Full happy path end-to-end on two real phones, volunteer and coordinator.
 - No-show sweep produces correct statuses across a mixed roster (confirmed-absent,
   checked-in-not-out, completed).
 - The ledger rejects UPDATE and DELETE at the database level — assert the exception, don't
   assume.
-- PDF export renders with correct totals and typography.
+- Excusing a `no_show` moves show rate up and does not mint hours.
+- Cancelling a shift with 12 signups produces 12 notifications, 12 `cancelled_by_org` rows,
+  and zero orphaned pending reminders.
+- PDF export renders with correct totals, typography, and tier breakdown.
 - A volunteer who never confirms but is checked in by the coordinator still gets hours.
+
+---
+
+### M4 — Discovery and signup
+
+Now that shifts exist and orgs are running them, the feed has something in it.
+
+Discover feed: published opportunities ranked by distance using the PostGIS `<->` operator
+against `users.home_location`, filterable by cause tag, kind, and "this week". Remote
+projects sort into their own band rather than pretending to have a distance.
+
+Opportunity page by kind:
+- **Recurring** — shift picker with **multi-select**. This is the differentiator: "every
+  Friday this month" is one tap and inserts one signup per selected shift, in a single
+  transaction. Partial failure rolls the whole set back.
+- **Event** — single RSVP.
+- **Project** — apply with answers against `opportunities.questions`.
+
+Auto-accept orgs go straight to `accepted`; others land in `applied`. Capacity full →
+`waitlisted` with position shown honestly ("2nd on the waitlist"). Cancel with a
+confirmation step that names what's being cancelled.
+
+**Accept**
+- Volunteer books 4 Friday shifts in one action; 4 signups exist; the ledger of upcoming
+  shifts reflects all 4.
+- Capacity is respected under concurrent load (test: 10 parallel inserts on a 5-capacity
+  shift → exactly 5 accepted, 5 waitlisted with positions 1–5, no duplicates).
+- Cancelling an accepted signup promotes the first waitlisted person and schedules their
+  confirm reminder.
+- Volunteer home "Up next" matches the database.
 
 ---
 
@@ -404,6 +479,8 @@ them alone until M1–M5 are accepted.
 | `/api/cron/materialize` | GET | `CRON_SECRET` | Daily. → `{ created, opportunities }`. |
 | `/api/cron/reminders` | GET | `CRON_SECRET` | Every 5 min. Claims due rows `for update skip locked`. → `{ sent, failed }`. |
 | `/api/cron/noshow` | GET | `CRON_SECRET` | Every 15 min. → `{ noShows, autoCompleted }`. |
+| `rpc/cancel_shift` | RPC | coordinator | `(shift_id, reason)` → count notified. Releases signups, voids pending reminders. |
+| `rpc/excuse_signup` | RPC | coordinator | `(signup_id, reason)` → `no_show → excused`. Available 7 days post-shift. |
 
 All cron routes verify `Authorization: Bearer ${CRON_SECRET}` and are idempotent — assume
 Vercel will occasionally invoke twice.
@@ -416,6 +493,23 @@ Vercel will occasionally invoke twice.
 signup** — never on landing, never on login. A person who has committed to a shift
 understands why we'd notify them. Every reminder has an email fallback; a push that fails
 to deliver falls through to Resend in the same dispatcher pass.
+
+**Notification budget.** Three pushes per shift × a weekly volunteer is twelve a month,
+which is how a product that claims to respect people's time gets its notifications turned
+off in the first fortnight. The dispatcher enforces, in `reminders.ts`:
+
+- **Quiet hours.** Nothing dispatches between 21:00 and 08:00 *shift-local*. A reminder due
+  inside that window is held to 08:00, except `shift_cancelled`, which always goes
+  immediately — someone needs to know before they drive there.
+- **Daily cap.** Maximum 3 notifications per user per day, counted against
+  `reminders_budget_idx`. Over the cap, the lower-priority reminder is marked `skipped`
+  rather than queued forever. Priority order: `shift_cancelled` > `confirm_48h` >
+  `logistics_2h` > `post_event_thanks` > `nudge`.
+- **Veteran suppression.** Skip `logistics_2h` for anyone who has completed the same
+  opportunity three or more times. They know where the north gate is. This is the cheapest
+  fatigue win available and it costs nothing in show rate.
+- Rate limits live in the library, never in the UI. A screen that hides a button is not a
+  rate limit.
 
 **Timezones.** Store UTC. Render in the shift's timezone (I5). Reminder send times are
 computed against shift-local time, so a T−48h reminder for a 9 AM Saturday shift lands at
@@ -434,9 +528,22 @@ volunteers, and signups in every status, so every screen has real-looking data o
 run. An empty-state screen and a full screen must both be reachable without hand-crafting
 rows.
 
-**Metrics (PostHog).** `signup_created`, `signup_confirmed`, `checked_in`, `no_show`,
-`second_shift_booked`. Instrumented from day one — the north-star is unmeasurable
-retroactively.
+**Metrics (PostHog).** Volunteer side: `signup_created`, `signup_confirmed`, `checked_in`,
+`no_show`, `excused`, `second_shift_booked`. Org side: `org_created`, `listing_published`,
+`shift_materialized`, `roster_opened`, `checkin_performed`, `impact_logged`. Instrumented
+from day one — the north star is unmeasurable retroactively.
+
+A funnel instrumented on one side only cannot tell you which side is leaking. The original
+brief listed volunteer events exclusively; if orgs publish listings nobody books, that is a
+completely different problem from volunteers browsing listings that don't exist, and the
+volunteer events alone cannot distinguish them.
+
+**North star vs. operating metric.** Second-shift conversion stays the north star, but it
+lags by weeks and it punishes orgs that run monthly rather than weekly — a volunteer who
+would happily return has no shift to return to, and the metric reads that as churn. Operate
+day to day on **show rate** (`confirmed → checked_in`): per-shift, immediate, felt directly
+by coordinators, and the thing the product actually claims to fix. Watch show rate; report
+second-shift.
 
 **Performance floor.** LCP < 2 s on mid-range mobile. Every interactive element
 keyboard-reachable. Reduced-motion respected on the mode transition.
@@ -514,7 +621,9 @@ acceptance criterion for its milestone, not a nice-to-have. No placeholder energ
 
 ### 12.7 Details that read as trust
 - The ledger PDF is typeset properly — same type system, org attestation lines, subtle paper
-  texture. A document someone hands a school administrator with confidence.
+  texture. A document someone hands a school administrator with confidence. It reports the
+  **verification mix**, not just a total ("48 hours · 41 coordinator-attested · 7 device").
+  Overclaiming here is the one credibility mistake the product cannot recover from.
 - Org verification pending state says what's happening: "Checking IRS records — usually
   under 24 h." Never a bare missing badge.
 - 404, error, and maintenance pages all carry the design system. Nobody ever sees a default
@@ -536,12 +645,14 @@ Flagged rather than guessed. None block M1.
 1. **Geocoding provider** — Mapbox, Google, or Nominatim. Affects cost and the create-org
    and onboarding flows. Needed by M2.
 2. **QR JWT secret rotation** — single long-lived server secret vs. per-org keys. Per-org
-   is better if orgs ever self-host displays. Needed by M4.
+   is better if orgs ever self-host displays. Needed by M3.
 3. **PDF generation** — React-PDF (typography control, heavier bundle) vs. a rendering
-   service. §12.7 sets a high bar; React-PDF is the safer bet. Needed by M4.
+   service. §12.7 sets a high bar; React-PDF is the safer bet. Needed by M3.
 4. **"Signed" in "signed PDF summary"** — a cryptographic signature with a public verify
    endpoint, or a visual attestation with a verification URL. The second is far cheaper and
-   probably enough for a school administrator. Decide before building the export.
-5. **Project hours** — projects have no shift window, so the clamp in §M4 doesn't apply.
+   probably enough for a school administrator, *given* that the export now reports its
+   verification mix honestly rather than asking the reader to trust a bare total. Decide
+   before building the export.
+5. **Project hours** — projects have no shift window, so the clamp in M3 doesn't apply.
    Proposal: self-reported hours with coordinator approval, `source = 'self'` until
    `verified_by` is set. Needs a decision before projects can log hours at all.

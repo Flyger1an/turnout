@@ -21,10 +21,12 @@ create type opportunity_kind    as enum ('event', 'recurring', 'project');
 create type opportunity_status  as enum ('draft', 'published', 'paused', 'archived');
 create type signup_status       as enum (
   'applied', 'waitlisted', 'accepted', 'confirmed',
-  'checked_in', 'completed', 'no_show', 'cancelled', 'declined'
+  'checked_in', 'completed', 'no_show', 'excused', 'cancelled', 'declined'
 );
 create type hour_source         as enum ('qr', 'geofence', 'coordinator', 'self', 'adjustment');
-create type reminder_kind       as enum ('confirm_48h', 'logistics_2h', 'post_event_thanks', 'nudge');
+create type reminder_kind       as enum (
+  'confirm_48h', 'logistics_2h', 'post_event_thanks', 'nudge', 'shift_cancelled'
+);
 create type reminder_status     as enum ('pending', 'sent', 'failed', 'skipped', 'cancelled');
 
 -- ---------------------------------------------------------------------------
@@ -62,7 +64,7 @@ create table orgs (
   cause_tags          text[] not null default '{}',
   ein                 text,
   verification_status verification_status not null default 'unverified',
-  verification_note   text,              -- M6: surfaced in the pending state (§13.7)
+  verification_note   text,              -- M6: surfaced in the pending state (§12.7)
   auto_accept         boolean not null default true,
   created_by          uuid not null references users (id),
   created_at          timestamptz not null default now(),
@@ -155,7 +157,7 @@ create table shifts (
   created_at     timestamptz not null default now(),
 
   constraint shift_ends_after_start check (ends_at > starts_at),
-  -- Idempotency key for cron/materialize (SPEC §9.2). Re-running creates zero rows.
+  -- Idempotency key for cron/materialize (SPEC M2). Re-running creates zero rows.
   unique (opportunity_id, starts_at)
 );
 
@@ -177,8 +179,13 @@ create table signups (
   confirmed_at      timestamptz,
   checked_in_at     timestamptz,
   checked_out_at    timestamptz,
-  closed_at         timestamptz,        -- completed | no_show | cancelled | declined
+  closed_at         timestamptz,        -- completed | no_show | excused | cancelled | declined
   cancel_reason     text,
+  -- Set when the org cancelled the shift out from under the volunteer, so the
+  -- "you cancelled" and "they cancelled" cases never read the same (SPEC §8.5).
+  cancelled_by_org  boolean not null default false,
+  excused_by        uuid references users (id),
+  excused_reason    text,
   checkin_method    hour_source,
   created_at        timestamptz not null default now(),
   updated_at        timestamptz not null default now(),
@@ -203,6 +210,16 @@ create table hour_entries (
   minutes     integer not null check (minutes <> 0),  -- negative = compensating entry
   source      hour_source not null,
   verified_by uuid references users (id),
+  -- Strength of evidence behind this entry. The PDF export shows the mix rather
+  -- than flattening everything into one number (SPEC §12.7): a QR scan is a
+  -- screenshot away from forgery, a coordinator attestation is not.
+  verification_tier text generated always as (
+    case
+      when verified_by is not null           then 'attested'
+      when source in ('qr', 'geofence')      then 'device'
+      else                                        'self'
+    end
+  ) stored,
   note        text,
   reverses    uuid references hour_entries (id),      -- set on compensating entries
   occurred_at timestamptz not null default now(),
@@ -241,6 +258,10 @@ create index reminders_due_idx on scheduled_reminders (send_at)
 -- Nudge rate limiting (M5: max 1 per person per week).
 create index reminders_nudge_idx on scheduled_reminders (user_id, org_id, created_at)
   where kind = 'nudge';
+-- Per-user notification budget: the dispatcher counts today's sends against the
+-- daily cap before dispatching anything (SPEC §10, notification budget).
+create index reminders_budget_idx on scheduled_reminders (user_id, sent_at)
+  where status = 'sent';
 
 -- ---------------------------------------------------------------------------
 -- push_subscriptions — web-push endpoints (one row per device)
@@ -312,9 +333,15 @@ returns boolean language sql immutable as $$
     ('applied',    'cancelled'),
     ('waitlisted', 'accepted'),   ('waitlisted','cancelled'),  ('waitlisted','declined'),
     ('accepted',   'confirmed'),  ('accepted',  'checked_in'), ('accepted',  'cancelled'),
-    ('accepted',   'no_show'),
+    ('accepted',   'no_show'),    ('accepted',  'excused'),
     ('confirmed',  'checked_in'), ('confirmed', 'cancelled'),  ('confirmed', 'no_show'),
-    ('checked_in', 'completed'),  ('checked_in','no_show')
+    ('confirmed',  'excused'),
+    ('checked_in', 'completed'),  ('checked_in','no_show'),
+    -- The only edge out of a terminal state. A coordinator excusing an absence
+    -- after the fact is a correction, not a lifecycle move: someone texted that
+    -- their kid was sick and the sweep had already fired. Without this the
+    -- volunteer carries a permanent mark and the org's show rate lies.
+    ('no_show',    'excused')
   );
 $$;
 
@@ -334,8 +361,15 @@ begin
   new.accepted_at    := coalesce(new.accepted_at,    case when new.status = 'accepted'   then now() end);
   new.confirmed_at   := coalesce(new.confirmed_at,   case when new.status = 'confirmed'  then now() end);
   new.checked_in_at  := coalesce(new.checked_in_at,  case when new.status = 'checked_in' then now() end);
-  if new.status in ('completed', 'no_show', 'cancelled', 'declined') then
+  if new.status in ('completed', 'no_show', 'excused', 'cancelled', 'declined') then
     new.closed_at := coalesce(new.closed_at, now());
+  end if;
+
+  -- Excusing is a coordinator act and must say who. Guards the case where an
+  -- excuse is written by a code path that forgot to attribute it.
+  if new.status = 'excused' and new.excused_by is null then
+    raise exception 'excused requires excused_by (signup %)', old.id
+      using errcode = 'not_null_violation';
   end if;
 
   -- Leaving the waitlist clears the queue position.
@@ -351,7 +385,7 @@ create trigger signups_guard before update on signups
 
 -- Capacity + waitlist placement --------------------------------------------
 -- Runs inside the writer's transaction with the shift row locked, so two
--- clients racing for the last spot can't both win (SPEC §13.2, capacity race).
+-- clients racing for the last spot can't both win (SPEC §12.2, capacity race).
 create or replace function shift_effective_capacity(p_shift_id uuid)
 returns integer language sql stable as $$
   select coalesce(s.capacity, o.capacity)
@@ -400,7 +434,12 @@ declare
   occupied integer;
   next_id  uuid;
 begin
-  if new.status not in ('cancelled', 'declined', 'no_show') then
+  if new.status not in ('cancelled', 'declined', 'no_show', 'excused') then
+    return null;
+  end if;
+
+  -- Nothing to promote into once the shift has started.
+  if exists (select 1 from shifts where id = new.shift_id and starts_at <= now()) then
     return null;
   end if;
 
@@ -502,6 +541,10 @@ where s.cancelled_at is null
 group by s.id, s.opportunity_id, o.org_id, s.starts_at, s.ends_at, s.capacity, o.capacity;
 
 -- Org 30-day strip: hours, show rate, new volunteers (M5).
+-- 'excused' appears in neither the numerator nor the denominator of show rate:
+-- an absence the coordinator forgave is not a broken promise, and counting it
+-- would make the one number the product sells on the one number coordinators
+-- learn to distrust.
 create view org_stats_30d as
 select
   o.id as org_id,
@@ -563,8 +606,9 @@ alter table scheduled_reminders enable row level security;
 alter table push_subscriptions  enable row level security;
 alter table impact_stats        enable row level security;
 
--- users: self only. (Coordinator-visible volunteer fields come from a
--- security-definer RPC, not a broad policy — see SPEC §7.3.)
+-- users: self only. A coordinator needs a roster row's name and shift count,
+-- which arrives via a security-definer RPC scoped to that shift — never by
+-- widening this policy to "any user who shares an org with me".
 create policy users_self_read   on users for select using (id = auth.uid());
 create policy users_self_write  on users for update using (id = auth.uid()) with check (id = auth.uid());
 create policy users_self_insert on users for insert with check (id = auth.uid());
@@ -612,6 +656,90 @@ create policy push_self      on push_subscriptions  for all    using (user_id = 
 create policy impact_read  on impact_stats for select using (true);
 create policy impact_write on impact_stats for all
   using (is_org_member(org_id)) with check (is_org_member(org_id));
+
+-- ---------------------------------------------------------------------------
+-- Org-initiated shift cancellation (SPEC §8.5)
+-- ---------------------------------------------------------------------------
+-- The highest-anger moment in the product. Cancelling a shift releases every
+-- open signup and queues an immediate notification for each affected person;
+-- `cancelled_by_org` keeps "you cancelled" and "they cancelled" distinguishable
+-- forever, which matters both for copy and for not blaming the volunteer in
+-- their own record.
+create or replace function cancel_shift(p_shift_id uuid, p_reason text)
+returns integer language plpgsql security definer set search_path = public as $$
+declare
+  v_org_id  uuid;
+  v_count   integer;
+begin
+  if not coordinates_shift(p_shift_id) then
+    raise exception 'not authorised to cancel shift %', p_shift_id
+      using errcode = 'insufficient_privilege';
+  end if;
+
+  select o.org_id into v_org_id
+  from shifts s
+  join opportunities o on o.id = s.opportunity_id
+  where s.id = p_shift_id;
+
+  update shifts
+     set cancelled_at = coalesce(cancelled_at, now()),
+         note = coalesce(p_reason, note)
+   where id = p_shift_id;
+
+  with released as (
+    update signups
+       set status           = 'cancelled',
+           cancelled_by_org = true,
+           cancel_reason    = p_reason
+     where shift_id = p_shift_id
+       and status in ('applied', 'waitlisted', 'accepted', 'confirmed')
+    returning id, user_id
+  ),
+  queued as (
+    insert into scheduled_reminders (signup_id, user_id, org_id, kind, send_at)
+    select r.id, r.user_id, v_org_id, 'shift_cancelled', now()
+    from released r
+    on conflict (signup_id, kind) do nothing
+    returning 1
+  )
+  select count(*) into v_count from queued;
+
+  -- Any reminder that would have fired for a shift that is no longer happening.
+  update scheduled_reminders
+     set status = 'cancelled'
+   where status = 'pending'
+     and kind in ('confirm_48h', 'logistics_2h', 'post_event_thanks')
+     and signup_id in (select id from signups where shift_id = p_shift_id);
+
+  return v_count;
+end $$;
+
+-- Coordinator forgives an absence. Open for 7 days after the shift ends, after
+-- which the record settles for good.
+create or replace function excuse_signup(p_signup_id uuid, p_reason text)
+returns void language plpgsql security definer set search_path = public as $$
+declare
+  v_shift_id uuid;
+  v_ends_at  timestamptz;
+begin
+  select g.shift_id, s.ends_at into v_shift_id, v_ends_at
+  from signups g join shifts s on s.id = g.shift_id
+  where g.id = p_signup_id;
+
+  if not coordinates_shift(v_shift_id) then
+    raise exception 'not authorised to excuse signup %', p_signup_id
+      using errcode = 'insufficient_privilege';
+  end if;
+
+  if v_ends_at < now() - interval '7 days' then
+    raise exception 'excuse window closed for signup %', p_signup_id
+      using errcode = 'check_violation';
+  end if;
+
+  update signups
+     set status = 'excused', excused_by = auth.uid(), excused_reason = p_reason
+   where id = p_signup_id;
+end $$;
 
 -- ---------------------------------------------------------------------------
 -- New auth user -> users row
