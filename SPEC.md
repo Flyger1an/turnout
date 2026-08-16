@@ -634,9 +634,17 @@ computed against shift-local time, so a T−48h reminder for a 9 AM Saturday shi
 - Vitest: `rrule.ts` window logic (including DST boundaries), `reminders.ts` scheduling, the
   notification budget and nudge rate limit, the hours clamp, and the `offline/` op-log
   reducer — replay ordering, clock clamping, and each conflict row in §8.4.
-- pgTAP: the transition trigger, enumerating **every** legal transition and a representative
-  sample of illegal ones; the append-only ledger; the capacity race; `active_org_id`
-  rejecting a non-membership.
+- pgTAP — `supabase/tests/lifecycle.test.sql`, 140 assertions, run with `supabase test db`:
+  the transition graph over its **entire** 90-pair cross product rather than a sample, so no
+  edge can be added without a deliberate decision; every legal transition driven through the
+  trigger on a real row, because a correct function proves nothing if it is not wired up;
+  illegal edges including each terminal state; the hours clamp at all four boundaries;
+  capacity, waitlist order and FIFO promotion; the append-only ledger.
+- RLS — `supabase/checks/rls.sql`, 20 assertions: impersonation as `authenticated` and
+  `anon` with JWT claims set. The table owner bypasses RLS, so a superuser session passes
+  every check while the policies do nothing. This suite must never be run as `postgres`.
+- `supabase/checks/invariants.sql`, 13 assertions: one path through each DB-enforced
+  invariant, including `active_org_id` rejecting a non-membership and repointing on revoke.
 - Playwright: signup → book → confirm → check-in → hours, plus visual regression on both
   home screens, profile + switch, every empty state, and the check-in success state.
 
