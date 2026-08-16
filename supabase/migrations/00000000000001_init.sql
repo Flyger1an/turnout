@@ -41,6 +41,11 @@ create table users (
   home_location  geography(Point, 4326),
   interests      text[] not null default '{}',
   active_mode    app_mode not null default 'volunteer',
+  -- Which org this person is currently acting as. Null until they join or
+  -- create one. Coordinating for a church and a food bank is ordinary, and
+  -- org_members has always supported it — this is the column that makes the
+  -- UI able to (SPEC M1, org switcher). FK added after orgs exists.
+  active_org_id  uuid,
   timezone       text not null default 'America/New_York',
   onboarded_at   timestamptz,
   created_at     timestamptz not null default now(),
@@ -72,6 +77,10 @@ create table orgs (
 );
 
 create index orgs_location_idx on orgs using gist (location);
+
+alter table users
+  add constraint users_active_org_fk
+  foreign key (active_org_id) references orgs (id) on delete set null;
 
 -- ---------------------------------------------------------------------------
 -- org_members — the only source of coordinator permission (I1)
@@ -278,6 +287,27 @@ create table push_subscriptions (
 );
 
 -- ---------------------------------------------------------------------------
+-- sync_ops — idempotency ledger for offline check-in replay (SPEC M3, offline)
+-- ---------------------------------------------------------------------------
+-- A check-in performed in a basement is a fact that happened before the network
+-- did. The device mints client_op_id at the moment of the tap; the primary key
+-- makes replay free, so the client can retry forever without asking whether it
+-- already succeeded.
+create table sync_ops (
+  client_op_id uuid primary key,
+  user_id      uuid not null references users (id) on delete cascade,
+  signup_id    uuid references signups (id) on delete set null,
+  kind         text not null check (kind in ('checkin', 'checkout')),
+  occurred_at  timestamptz not null,     -- device clock at the tap, server-clamped
+  received_at  timestamptz not null default now(),
+  outcome      text not null default 'applied'
+                 check (outcome in ('applied', 'noop', 'rejected')),
+  detail       text
+);
+
+create index sync_ops_user_idx on sync_ops (user_id, received_at desc);
+
+-- ---------------------------------------------------------------------------
 -- impact_stats — what the coordinator logged; feeds the post-event push
 -- ---------------------------------------------------------------------------
 create table impact_stats (
@@ -309,6 +339,48 @@ create trigger users_touch         before update on users         for each row e
 create trigger orgs_touch          before update on orgs          for each row execute function touch_updated_at();
 create trigger opportunities_touch before update on opportunities for each row execute function touch_updated_at();
 create trigger signups_touch       before update on signups       for each row execute function touch_updated_at();
+
+-- Active org must be an org you actually belong to ---------------------------
+-- Without this, active_org_id is a client-supplied claim about identity. RLS
+-- would still refuse the data, but the UI would render a header for an org the
+-- person has no relationship with, which is worse than an error.
+create or replace function users_validate_active_org() returns trigger
+language plpgsql as $$
+begin
+  if new.active_org_id is not null
+     and not exists (
+       select 1 from org_members
+       where org_id = new.active_org_id and user_id = new.id
+     )
+  then
+    raise exception 'user % is not a member of org %', new.id, new.active_org_id
+      using errcode = 'insufficient_privilege';
+  end if;
+  return new;
+end $$;
+
+create trigger users_active_org_check before insert or update of active_org_id on users
+  for each row execute function users_validate_active_org();
+
+-- Losing a membership must not strand someone in a phantom org. Repoint to any
+-- remaining membership, otherwise clear it and let them fall back to volunteer.
+create or replace function org_members_clear_active() returns trigger
+language plpgsql as $$
+begin
+  update users u
+     set active_org_id = (
+       select m.org_id from org_members m
+       where m.user_id = old.user_id
+       order by m.created_at
+       limit 1
+     )
+   where u.id = old.user_id
+     and u.active_org_id = old.org_id;
+  return null;
+end $$;
+
+create trigger org_members_clear_active_trg after delete on org_members
+  for each row execute function org_members_clear_active();
 
 -- I3: append-only ledger ----------------------------------------------------
 create or replace function reject_ledger_mutation() returns trigger
@@ -604,6 +676,7 @@ alter table signups             enable row level security;
 alter table hour_entries        enable row level security;
 alter table scheduled_reminders enable row level security;
 alter table push_subscriptions  enable row level security;
+alter table sync_ops            enable row level security;
 alter table impact_stats        enable row level security;
 
 -- users: self only. A coordinator needs a roster row's name and shift count,
@@ -651,6 +724,9 @@ create policy hours_read on hour_entries for select
   using (user_id = auth.uid() or is_org_member(org_id));
 
 create policy reminders_read on scheduled_reminders for select using (user_id = auth.uid());
+-- Read-only to the client; writes go through /api/checkin under the service role
+-- so the server owns clamping and conflict resolution.
+create policy sync_ops_read on sync_ops for select using (user_id = auth.uid());
 create policy push_self      on push_subscriptions  for all    using (user_id = auth.uid()) with check (user_id = auth.uid());
 
 create policy impact_read  on impact_stats for select using (true);

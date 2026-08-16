@@ -50,6 +50,33 @@ around them should fail loudly in development.
 I5 is the one that gets violated by accident. A volunteer who books a shift while
 travelling must see the shift's local time, or they show up an hour off.
 
+### 2.1 Assumptions under test
+
+The invariants above must hold. What follows is something we *believe*, borrowed from a
+product whose users are not quite ours. It carries a tripwire and a pre-committed response,
+so that being wrong becomes a measurement instead of an argument six weeks in.
+
+**A1 — Mode switching is a rare, deliberate act.** The Profile placement in M1 rests
+entirely on this.
+
+The pattern comes from Fiverr, where it works because sellers rarely buy. Turnout's
+coordinators very often volunteer — that is the one-account thesis in §1, stated as a
+selling point. So the base rate we are borrowing may not transfer, and the cost of being
+wrong is that the most common cross-mode need (checking my own shift) costs three taps.
+
+*Tripwire.* Instrument `mode_switched` with `from`, `to`, and whether the user holds both an
+`org_members` row and a live volunteer signup. If dual-role users switch more than 3× per
+week at the median for two consecutive weeks, A1 is false.
+
+*Pre-committed response, in order.* First, a **peek card**: when a coordinator in org mode
+has a personal shift inside 24 hours, surface it on the dashboard with an inline confirm CTA
+that deep-links without changing mode. That serves the actual need and adds no persistent
+chrome. Only if the peek fails to move the number do we revisit placement.
+
+*Explicitly not the response:* a persistent header toggle. It was rejected for reasons a
+higher switch rate does not overturn — it still overweights a secondary action, and
+accidental flips get **more** costly as switching gets more common, not less.
+
 ---
 
 ## 3. Stack and conventions
@@ -87,14 +114,16 @@ turnout/
       hours/export/route.ts        # signed PDF
   components/
     mode-switch.tsx                # THE toggle. Owns body class + route swap.
+    org-switcher.tsx               # only renders at 2+ memberships (M1)
     shift-card.tsx  fill-bar.tsx  ledger.tsx  roster-row.tsx  confirm-cta.tsx
     empty/                         # one component per designed empty state (§12.1)
   lib/
     supabase/  client.ts server.ts middleware.ts
     rrule.ts        # materialization window logic
-    reminders.ts    # scheduling rules + nudge rate limit
+    reminders.ts    # scheduling rules, budget, nudge rate limit
     push.ts         # web-push helpers
     time.ts         # UTC ↔ shift-local, humanized dates
+    offline/        # queue.ts (durable op log), replay.ts, cache.ts (§8.4)
   supabase/migrations/
   design/
   SPEC.md
@@ -141,8 +170,10 @@ restores it. `home_location` is a PostGIS point driving distance ranking.
 **`orgs`** — public-readable (they're listings). `auto_accept` decides whether signups land
 in `accepted` or `applied`. `verification_status` and `ein` exist now; verification is M6.
 
-**`org_members`** — the only source of coordinator permission. Role `owner` or
-`coordinator`. Owner can manage membership; both can run shifts.
+**`org_members`** — the only source of coordinator permission, many-to-many since the
+beginning. Role `owner` or `coordinator`. Owner can manage membership; both can run shifts.
+`users.active_org_id` names the one currently in play; a trigger refuses to point it at an
+org you don't belong to, and losing a membership repoints it rather than stranding you.
 
 **`opportunities`** — one of three kinds:
 - `event` — one dated block, inserts a single shift on publish.
@@ -168,6 +199,10 @@ scheduling idempotent — re-running the scheduler never double-sends.
 
 **`shift_fill`** view — capacity, filled, confirmed, waitlisted, ratio. The org dashboard
 and roster both read from here rather than recomputing.
+
+**`sync_ops`** — idempotency ledger for offline check-in replay. `client_op_id` is minted on
+the device at the moment of the tap and is the primary key, which is what makes retrying
+free.
 
 ---
 
@@ -278,13 +313,35 @@ The toggle contract:
 6. Announce the change to screen readers: `"Organization mode"` / `"Volunteer mode"` via a
    polite live region.
 
+**More than one organization.** `org_members` has always been many-to-many, and coordinating
+for both a church and a food bank is ordinary rather than exotic. `users.active_org_id` names
+the one in play.
+
+- **One org** — no switcher anywhere. The org-mode greeting is the org name, exactly as the
+  mock has it, and is not interactive. The majority pay nothing for a feature they don't need.
+- **Two or more** — the greeting *becomes* the switcher. Tapping the org name opens a sheet
+  listing memberships with role; picking one swaps `active_org_id` and re-renders dashboard,
+  listings, and roster against it. A chevron beside the name is the only pixel this costs.
+- This is not a mode control, so the clean-header rule stands: it is scoped to org mode and
+  appears only for people who need it. There is **no re-tint** — both orgs are org mode and
+  share an accent. Motion is a content cross-fade, nothing more.
+- Creating a second org makes it active. Being removed from the active org repoints to a
+  remaining membership, or drops to volunteer mode with an explanation — never a dead header.
+
 **Accept**
 - New user signs up and lands in volunteer home.
 - Header contains no mode control anywhere in either mode.
 - Profile switch flips mode with re-tint and route change.
 - Non-member sees the setup path, not an empty dashboard.
-- Hard refresh restores the last active mode.
+- Hard refresh restores the last active mode *and* the last active org.
 - Reduced-motion users get an instant swap with no animation.
+- A coordinator in two orgs switches between them; dashboard, listings, and roster all
+  follow. A coordinator in one org sees no switcher affordance at all.
+- Setting `active_org_id` to an org the user doesn't belong to is rejected by the database,
+  not merely hidden by the UI.
+- Deleting the active `org_members` row mid-session leaves a working session.
+- `mode_switched` fires with its dual-role flag (A1's tripwire is only as good as its
+  instrumentation).
 
 ---
 
@@ -380,6 +437,57 @@ per entry, and **Export PDF**.
 with checkout at `ends_at`. Then `post_event_thanks` fires with hours earned plus the org's
 impact stat if one was logged ("You helped serve 340 meals"). The coordinator gets a prompt
 to log an `impact_stats` metric on the roster screen once the shift ends.
+
+#### 8.4 — Offline check-in
+
+Budget roughly a week. It is in scope on purpose: volunteers gather in church basements,
+warehouses, and parks, and a check-in flow that needs bars is a check-in flow that fails on
+the days that matter most. The original brief gave this one bullet, which badly understated
+it.
+
+**Must work with no network:** the roster screen renders, coordinator check-in and check-out
+taps register, and a volunteer's QR scan is captured.
+
+**Cache.** IndexedDB. Rosters pre-cache while online for any shift the coordinator
+coordinates starting within 12 hours — caching on screen-open is useless, because the first
+open is often already at the park. The entry holds shift, opportunity, and attendee list.
+Bounded to ±24 hours, purged on logout: it contains volunteer names.
+
+**Op log.** Every tap appends to a durable queue —
+`{ client_op_id (uuid, minted on device), kind, signup_id, occurred_at, method }`. The UI
+updates optimistically from the log, and the queue survives a force-quit. Nothing is ever
+dropped silently.
+
+**Replay.** Fires on the `online` event, on app foreground, and on a backoff timer while ops
+are pending. Ops replay **per signup in `occurred_at` order**, not submission order.
+`sync_ops.client_op_id` is the primary key, so a retry that already landed is a no-op rather
+than a duplicate — the client never has to ask whether it already succeeded.
+
+**Clocks.** Device clocks are wrong, sometimes by hours. The server clamps `occurred_at` into
+the shift window ±30 min — the same rule as the online path — and records the skew in
+`detail`. This protects the hours clamp downstream from a phone set three hours fast.
+
+**Conflicts.** All of these are normal. None is an error, and none produces a toast:
+
+| Situation | Resolution |
+|---|---|
+| Volunteer self-scanned online while the coordinator checked them in offline | Earliest `occurred_at` wins; the later op records `noop`. Roster shows checked in, once. |
+| Two coordinator devices check the same person in | Same rule, same outcome. One `hour_entry`. |
+| Op targets a signup cancelled server-side meanwhile | `rejected`. The roster row reads "Jordan cancelled before the shift — not checked in." A row state, not an alert. |
+| Op targets a shift the org cancelled | `rejected`, plus the roster carries the cancellation banner. |
+
+**UI.** The offline banner from §12.2. A pending count in the roster header while ops are
+queued, clearing when the queue drains — a coordinator should never have to wonder whether
+it took. No spinner ever blocks a tap.
+
+**Accept**
+- Airplane mode: open roster, check in 6 people, force-quit the app, reopen, restore network
+  → 6 check-ins land, exactly once each.
+- The same person checked in on two offline devices produces exactly one `hour_entry`.
+- An op for a cancelled signup surfaces as a row state and does not block the rest of the
+  queue.
+- A roster for a shift starting in 8 hours renders with no network on the day's first open.
+- Device clock set 3 hours fast → check-in clamps into the window and hours come out correct.
 
 #### 8.5 — Cancellation and correction
 
@@ -516,10 +624,12 @@ computed against shift-local time, so a T−48h reminder for a 9 AM Saturday shi
 9 AM Thursday *there*.
 
 **Testing.**
-- Vitest: `rrule.ts` window logic (including DST boundaries), `reminders.ts` scheduling and
-  the nudge rate limit, the hours clamp.
+- Vitest: `rrule.ts` window logic (including DST boundaries), `reminders.ts` scheduling, the
+  notification budget and nudge rate limit, the hours clamp, and the `offline/` op-log
+  reducer — replay ordering, clock clamping, and each conflict row in §8.4.
 - pgTAP: the transition trigger, enumerating **every** legal transition and a representative
-  sample of illegal ones; the append-only ledger; the capacity race.
+  sample of illegal ones; the append-only ledger; the capacity race; `active_org_id`
+  rejecting a non-membership.
 - Playwright: signup → book → confirm → check-in → hours, plus visual regression on both
   home screens, profile + switch, every empty state, and the check-in success state.
 
@@ -530,8 +640,13 @@ rows.
 
 **Metrics (PostHog).** Volunteer side: `signup_created`, `signup_confirmed`, `checked_in`,
 `no_show`, `excused`, `second_shift_booked`. Org side: `org_created`, `listing_published`,
-`shift_materialized`, `roster_opened`, `checkin_performed`, `impact_logged`. Instrumented
-from day one — the north star is unmeasurable retroactively.
+`shift_materialized`, `roster_opened`, `checkin_performed`, `impact_logged`. Navigation:
+`mode_switched` (with `from`, `to`, `dual_role`), `org_switched`. Reliability:
+`checkin_queued_offline`, `sync_replayed` (with op count and outcome mix). Instrumented from
+day one — the north star is unmeasurable retroactively.
+
+`mode_switched.dual_role` is not decoration: it is the whole tripwire for A1 in §2.1, and a
+switch event without it cannot answer the question the assumption poses.
 
 A funnel instrumented on one side only cannot tell you which side is leaking. The original
 brief listed volunteer events exclusively; if orgs publish listings nobody books, that is a
@@ -581,7 +696,9 @@ acceptance criterion for its milestone, not a nice-to-have. No placeholder energ
 - Every failure path has human copy, an action, and preserved input. No raw error strings,
   no toast-and-shrug.
 - **Offline.** Check-in queues locally and syncs — volunteers are in basements and fields.
-  Banner: "You're offline — your check-in is saved and will sync."
+  Banner: "You're offline — your check-in is saved and will sync." Full mechanics, including
+  replay ordering and conflict resolution, are specified in §8.4; this is a week of work, not
+  a bullet.
 - **Capacity race.** The loser of a race sees "That spot just filled — you're first on the
   waitlist," already done. Not an error, not a retry.
 
@@ -610,7 +727,7 @@ acceptance criterion for its milestone, not a nice-to-have. No placeholder energ
 - Tab navigation is instant (prefetched). Data revalidates in the background and never
   blocks paint with a spinner when any cached state exists.
 - The QR roster screen renders offline from last sync. A coordinator in a park with no
-  signal can still check people in.
+  signal can still check people in — §8.4 for how.
 
 ### 12.6 Accessibility as craft
 - Full keyboard path through booking and check-in. Visible focus states in the accent color.
