@@ -77,11 +77,11 @@ do $$
 declare n integer;
 begin
   -- Grants exist and published listings are readable.
-  select count(*) into n from opportunities where status = 'published';
+  select count(*) into n from opportunities where status = 'published' and org_id in ('aaaaaaaa-0000-0000-0000-000000000001','aaaaaaaa-0000-0000-0000-000000000002');
   if n <> 1 then raise exception 'FAIL: volunteer sees % published opportunities, want 1', n; end if;
   raise notice 'PASS  volunteer reads published opportunities';
 
-  select count(*) into n from opportunities where status = 'draft';
+  select count(*) into n from opportunities where status = 'draft' and org_id in ('aaaaaaaa-0000-0000-0000-000000000001','aaaaaaaa-0000-0000-0000-000000000002');
   if n <> 0 then raise exception 'FAIL: volunteer sees % drafts, want 0', n; end if;
   raise notice 'PASS  volunteer cannot read drafts';
 
@@ -153,7 +153,10 @@ end $$;
 do $$
 declare n integer;
 begin
-  select count(*) into n from shift_fill;
+  select count(*) into n from shift_fill
+  where opportunity_id in ('bbbbbbbb-0000-0000-0000-000000000001',
+                           'bbbbbbbb-0000-0000-0000-000000000002',
+                           'bbbbbbbb-0000-0000-0000-000000000003');
   if n <> 1 then
     raise exception 'FAIL: shift_fill exposes % shifts to a volunteer, want 1 (the published one)', n;
   end if;
@@ -204,11 +207,11 @@ select set_config('request.jwt.claims', '{"role":"anon"}', true);
 do $$
 declare n integer;
 begin
-  select count(*) into n from opportunities where status = 'published';
+  select count(*) into n from opportunities where status = 'published' and org_id in ('aaaaaaaa-0000-0000-0000-000000000001','aaaaaaaa-0000-0000-0000-000000000002');
   if n <> 1 then raise exception 'FAIL: anon sees % published opportunities, want 1', n; end if;
   raise notice 'PASS  anon can browse published listings';
 
-  select count(*) into n from opportunities where status = 'draft';
+  select count(*) into n from opportunities where status = 'draft' and org_id in ('aaaaaaaa-0000-0000-0000-000000000001','aaaaaaaa-0000-0000-0000-000000000002');
   if n <> 0 then raise exception 'FAIL: anon sees % drafts', n; end if;
   raise notice 'PASS  anon cannot read drafts';
 

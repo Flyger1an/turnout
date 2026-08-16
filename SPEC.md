@@ -648,10 +648,24 @@ computed against shift-local time, so a T−48h reminder for a 9 AM Saturday shi
 - Playwright: signup → book → confirm → check-in → hours, plus visual regression on both
   home screens, profile + switch, every empty state, and the check-in success state.
 
-**Seed script.** `pnpm seed` creates 3 orgs, 12 opportunities across all kinds, 40 fake
-volunteers, and signups in every status, so every screen has real-looking data on first
-run. An empty-state screen and a full screen must both be reachable without hand-crafting
-rows.
+**Seed script.** `supabase/seed.sql`, run automatically by `supabase db reset` (a `pnpm
+seed` script should wrap that once package.json exists). Creates 4 orgs, 12 opportunities
+across all kinds, 40 volunteers, and signups in **every** status, so every screen has
+real-looking data on first run.
+
+Its numbers are reverse-engineered from the mock and verified to reproduce it exactly:
+Sam's 48 hours across 3 orgs and 6-week streak, tomorrow's pantry shift at 6 of 10 filled
+with 4 confirmed, the full Tuesday restock at 8 of 8 with 7 confirmed, three applicants,
+and Eastside's 212 hours / 91% show rate / 14 new volunteers over 30 days. That makes the
+seed the executable form of the design reference and gives §12.8's visual regression a
+deterministic target.
+
+`newcomer@turnout.dev` has no org, no signups and no hours, so every empty state is one
+login away; `dana@turnout.dev` coordinates two orgs, which exercises the org switcher.
+Sign in by magic link at the local mail catcher — no passwords are stored.
+
+The seed refuses to run unless `app.settings.jwt_secret` is the CLI's local default, so
+`db reset --linked` cannot inject 40 fake volunteers into a real project.
 
 **Metrics (PostHog).** Volunteer side: `signup_created`, `signup_confirmed`, `checked_in`,
 `no_show`, `excused`, `second_shift_booked`. Org side: `org_created`, `listing_published`,
